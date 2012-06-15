@@ -18,9 +18,16 @@ type CsvFile(filename) =
     // Cache the sequence of all data lines (all lines but the first)
     let data = 
         seq { for line in File.ReadAllLines(filename) |> Seq.skip 1 do
-                yield line.Split(',') |> Array.map float }
+                yield line.Split(',')  }
         |> Seq.cache
     member __.Data = data
+
+let tryParseWith tryParseFunc = tryParseFunc >> function  | true, v    -> Some v
+                                                          | false, _   -> None                   
+
+let converttodouble (s:string) = 
+   let m = s
+   if m = "" then 0. else System.Double.Parse(m)
 
 // Create the main provided type
 let csvType ownerType (cfg:TypeProviderConfig) =
@@ -29,36 +36,47 @@ let csvType ownerType (cfg:TypeProviderConfig) =
         (fun typeName fileName ->
             let resolvedFileName = findConfigFile cfg.ResolutionFolder fileName
             watchForChanges ownerType resolvedFileName
-            let headerLine =
-                resolvedFileName
-                    |> File.ReadLines
-                    |> Seq.head
+            let lines =  resolvedFileName  |> File.ReadLines
+            let headerLine  = lines |> Seq.head
+            let firstDataline =  if lines |> Seq.length > 1 then Some(lines |> Seq.nth 1) else None
 
             // extract header names from the file, splitting on commas
             // we use Regex matching so that we can get the position in the row at which the field occurs
             let headers = [for m in Regex.Matches(headerLine, "[^,]+") -> m]
+            let basictypesisfloat  =  match firstDataline with 
+                                      | Some(firstdata) -> Some [for m in (firstdata.Split(',')) do 
+                                                                     let value =    (tryParseWith  (System.Double.TryParse) (m)).IsSome || m = ""
+                                                                     yield value  ]
+                                      | _ -> None
 
             let rowType =
-                runtimeType<float[]> "Row"
+                runtimeType<string[]> "Row"
                   |> hideOldMethods
                   |++!> (
                         headers
                         |> Seq.mapi (fun i header ->
-                            // try to decompose this header into a name and unit
-                            let fieldName, fieldType =
-                                let m = Regex.Match(header.Value, @"(?<field>.+) \((?<unit>.+)\)")
-                                if m.Success then
-                                    let unitName = m.Groups.["unit"].Value
-                                    let units = ProvidedMeasureBuilder.Default.SI unitName
-                                    m.Groups.["field"].Value, ProvidedMeasureBuilder.Default.AnnotateType(typeof<float>, [units])
-                                else
-                                    // no units, just treat it as a normal float
-                                    header.Value, typeof<float>
+                              if basictypesisfloat.IsSome && basictypesisfloat.Value.Length > i && not(basictypesisfloat.Value.[i]) then 
+                                 let fieldName, fieldType = header.Value, typeof<string>
+                                 provideProperty 
+                                    fieldName 
+                                    fieldType
+                                    (fun args -> <@@ (%%args.[0]:string[]).[i] @@>)
+                              else
+                                 // try to decompose this header into a name and unit
+                                 let fieldName, fieldType =
+                                    let m = Regex.Match(header.Value, @"(?<field>.+) \((?<unit>.+)\)")
+                                    if m.Success then
+                                       let unitName = m.Groups.["unit"].Value
+                                       let units = ProvidedMeasureBuilder.Default.SI unitName
+                                       m.Groups.["field"].Value, ProvidedMeasureBuilder.Default.AnnotateType(typeof<float>, [units])
+                                    else
+                                       // no units, just treat it as a normal float
+                                       header.Value, typeof<float>
+                                 provideProperty 
+                                    fieldName 
+                                    fieldType
+                                    (fun args -> <@@ converttodouble ((%%args.[0]:string[]).[i]) @@>)
                             
-                            provideProperty 
-                                fieldName 
-                                fieldType
-                                (fun args -> <@@ (%%args.[0]:float[]).[i] @@>)
                               |> addDefinitionLocation 
                                     { Line = 1
                                       Column = header.Index + 1 
